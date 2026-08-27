@@ -4,6 +4,8 @@
 
 > **公開版についての注記**: テナント ID・環境 URL・SharePoint の各種 ID・Connection Reference 名・アカウント情報は、`YOURORG` / `YOUR-TENANT-ID` / `YOUR-FILE-ID` などのプレースホルダーに置換しています。手順・コマンド・検証結果はすべて実際に実行したものです。
 
+計画（第二段階）: [power-automate-ai-phase2-plan.md](power-automate-ai-phase2-plan.md)
+
 ## ステップ進捗サマリ
 
 | Step | 内容 | 状態 |
@@ -356,3 +358,443 @@ pack → import 成功。**フローはアクティブ状態を維持**（オン
 ### 実行テスト結果 — ✅ 成功（2026-08-27）
 
 ユーザーが `Python` を入力して実行し、**山田太郎のみが取得されることを確認**。トリガー入力の追加を含む機能拡張が、Designer を使わず「AI ソース編集 → CLI デプロイ」だけで実現できることを実証した。
+
+---
+
+# 第二段階 — 完全自動ループ
+
+計画: [power-automate-ai-phase2-plan.md](power-automate-ai-phase2-plan.md)
+
+## 進捗サマリ（第二段階）
+
+| Step | 内容 | 状態 |
+| --- | --- | --- |
+| P1 | 事前調査（pac トークンの適用範囲・デバイスコードフローの可否） | ✅ 完了（2026-08-27） |
+| P2 | `token.ps1` 実装 → Flow API トークン取得 | ✅ 完了（2026-08-27・デバイスコード認証成功） |
+| P3 | Flow API エンドポイント形状の確定 | ✅ 完了（2026-08-27） |
+| P4 | 実値入り `src/` の復元（export → unpack） | ✅ 完了（2026-08-27） |
+| P5 | API からのフロー起動 | 🔄 進行中（接続参照の問題は解決。トリガー種別の制約に到達） |
+| P6 | 実行結果の即時取得・失敗アクション詳細 | 未着手 |
+| P7 | `repair-loop.ps1` 1コマンド実行 | 未着手 |
+| P8 | Draft フローの API 有効化 | 未着手 |
+
+---
+
+## 2026-08-27 — P1: 事前調査（AI）
+
+### `pac auth token` の適用範囲 — ❌ 実行系には使えない
+
+`pac auth token` は**引数を一切受け付けない**（`--help` すら unknown argument）。取得した JWT を
+デコードした結果:
+
+```text
+aud : https://api.powerplatform.com
+scp : All.All.ReadWrite AppManagement.* Connectivity.* CopilotStudio.* PowerApps.* PowerPages.*
+```
+
+**スコープに Power Automate（フロー実行系）が一切含まれない**。実測した到達性:
+
+| 対象 | 結果 |
+| --- | --- |
+| `https://api.powerplatform.com/powerautomate/environments/{env}/flows` | **404**（そのような面は存在しない） |
+| `https://api.flow.microsoft.com/providers/Microsoft.ProcessSimple/...` | **401** |
+| `https://YOURORG.crm7.dynamics.com/api/data/v9.2/WhoAmI` | **401** |
+
+また `pac env` のサブコマンドは `who / list / fetch / list-settings / update-settings / select / features`
+のみで、**Dataverse レコードの作成・更新はできない**（`fetch` は読み取り専用）。
+
+→ **結論: pac CLI 単体では第二段階の「起動」「監視」に到達できない。別トークンが必須。**
+
+### 代替経路の選定
+
+| 経路 | 判定 |
+| --- | --- |
+| Entra ID アプリ登録＋サービスプリンシパル | テナント管理者権限が必要。PoC では重い |
+| az CLI の `get-access-token` | az 未インストール |
+| PowerShell モジュール（Microsoft.PowerApps.* / MSAL.PS） | 未インストール。要ダウンロード |
+| **デバイスコードフロー（well-known パブリッククライアント）** | **採用**。インストール不要、`Invoke-RestMethod` のみで完結 |
+
+well-known パブリッククライアント2種でデバイスコード発行を試験し、いずれも成功:
+
+| クライアント | Flow API | Dataverse |
+| --- | --- | --- |
+| Azure CLI `04b07795-8ddb-461a-bbee-02f9e1bf7b46` | ✅ 発行成功 | ✅ 発行成功 |
+| Dynamics CRM `51f81489-12ee-4a9e-aaae-a2591f45987d` | ✅ 発行成功 | ✅ 発行成功 |
+
+### `claude` CLI の非対話実行 — ✅ 可能
+
+`claude --help` に `-p/--print` / `--permission-mode` / `--allowedTools` / `--output-format` を確認。
+ループから AI 修正を呼び出す手段は確保できた。
+
+---
+
+## 2026-08-27 — P2: Flow API トークン取得（AI ＋ 人間の初回サインインのみ）
+
+`scripts/token.ps1` を実装（Request / Poll / Get / Status の4モード）。
+
+- Azure CLI クライアント ID でデバイスコードを発行 → ユーザーが `https://login.microsoft.com/device`
+  でコードを入力しサインイン → **トークン取得成功**。
+- 取得したトークンの実体:
+
+```text
+aud : https://service.flow.microsoft.com/
+scp : user_impersonation
+```
+
+- **追加の管理者同意は不要だった**（Azure CLI クライアントは Flow サービスに対して事前同意済み）。
+- リフレッシュトークンは `.secrets/token-service-flow-microsoft-com.json` に **DPAPI（ユーザー単位）で
+  暗号化して保存**。2回目以降は `-Mode Get` が無人でリフレッシュする。
+
+### 実装上の重要な知見（Windows PowerShell 5.1）
+
+1. **BOM なし UTF-8 の `.ps1` は ANSI（CP932）として読まれ、日本語リテラルが壊れて構文エラーになる。**
+   最初に日本語コメント付きで書いたスクリプトは全滅した。→ **スクリプトは ASCII のみで記述**し、
+   日本語の説明は `docs/` 側に置く方針に変更。リポジトリのパス自体に日本語が含まれるため、
+   スクリプト内でパスをリテラル指定するのも不可（相対パス・`$PSScriptRoot` を使う）。
+2. `Invoke-RestMethod` が失敗した際、`$_.Exception.Response.GetResponseStream()` は
+   既に消費済みで読めないことがある。**エラー本文は `$_.ErrorDetails.Message` から取る**のが確実。
+   これを誤ると `authorization_pending`（デバイスコードのポーリング中の正常応答）を
+   致命的エラーと誤認して即 throw する。
+
+---
+
+## 2026-08-27 — P3: Flow API エンドポイントの確定（AI）
+
+ベース: `https://api.flow.microsoft.com/providers/Microsoft.ProcessSimple/environments/{environmentId}`
+
+| エンドポイント | 結果 |
+| --- | --- |
+| `GET /flows?api-version=2016-11-01` | ✅ 200。ソリューションフローも列挙される（`state: Started`） |
+| `GET /flows/{workflowId}` | ✅ 200。`properties.definition` に Logic Apps 定義がそのまま入る |
+| `GET /flows/{workflowIdUnique}` | ✅ 200（**どちらの GUID でも参照できる**） |
+| `GET /flows/{id}/runs` | ✅ 200。`startTime` / `endTime` / `status` を含む実行履歴 |
+| `GET /flows/{id}/triggers` | ✅ 200。トリガー名 `manual` / `state: Enabled` |
+| `GET /flows/{id}/triggers/manual` | ✅ 200 |
+
+**FlowRun（Dataverse）の約25分遅延に対し、Flow API の `runs` はポータルと同じ経路のため即時性が期待できる**
+（P6 で実測予定）。
+
+---
+
+## 2026-08-27 — P5: API からのフロー起動（AI）— 2つの壁
+
+### 壁1: `InvokerConnectionOverrideFailed` — ✅ 解決
+
+`POST /flows/{id}/triggers/manual/run` を叩くと 400:
+
+```text
+InvokerConnectionOverrideFailed:
+Failed to parse invoker connections from trigger 'manual' outputs.
+Exception: Could not find property 'headers.X-MS-APIM-Tokens' in the trigger outputs.
+Workflow has connection references '["shared_excelonlinebusiness"]' with invoker runtime source.
+```
+
+原因: フロー定義の接続参照が `"runtimeSource": "invoker"` になっており、**呼び出し元（ポータル）が
+`X-MS-APIM-Tokens` ヘッダーでコネクション トークンを渡す前提**になっている。API から素で叩くと
+このヘッダーが無いため解決できない。
+
+対応: `src/Workflows/*.json` の接続参照を **`"runtimeSource": "embedded"`** に変更して再デプロイ。
+
+```diff
+-        "runtimeSource": "invoker",
++        "runtimeSource": "embedded",
+```
+
+デプロイ後、API から見た接続参照は `"source": "Embedded"` に変わり、**このエラーは解消**した。
+接続参照の論理名・コネクション ID は一切変更していない（AI の禁止領域は不変）。
+
+> **PoC としての知見**: ソリューションフローを API/CLI から起動可能にするには、
+> 接続参照の runtime source を invoker から embedded に切り替える必要がある。
+> これは「フローの実行主体が対話ユーザーからサービス（自動化）へ変わる」ことを意味する。
+
+### 壁2: `TriggerInputSchemaMismatch` — トリガー種別の構造的制約
+
+`embedded` 化後、同じ POST が別のエラーになった:
+
+```text
+TriggerInputSchemaMismatch:
+The input body for trigger 'manual' of type 'Request' did not match its schema definition.
+The input body is missing required schema properties.
+```
+
+トリガーは第一段階の機能追加でテキスト入力 `text`（必須）を持つ。そこでボディの形を6通り試験:
+
+| ボディ | 結果 |
+| --- | --- |
+| （ボディ無し） | 400 TriggerInputSchemaMismatch |
+| `{}` | 400 同上 |
+| `{"text":"Python"}` | 400 同上 |
+| `{"text":"Python"}` ＋ `charset=utf-8` | 400 同上 |
+| `{"inputs":{"text":"Python"}}` | 400 同上 |
+| `{"triggerBody":{"text":"Python"}}` | 400 同上 |
+| `{"headers":{...},"body":{"text":"Python"}}` | 400 同上 |
+
+**ボディ無しと `{"text":"Python"}` が完全に同じエラー** → この `run` エンドポイントは
+**リクエストボディをトリガーへ転送していない**。つまり Button トリガーには API から入力を渡せない。
+
+Request 型トリガー本来の入口である callback URL も試したが:
+
+```text
+POST /flows/{id}/triggers/manual/listCallbackUrl
+→ 400 ListCallbackUrlOperationBlocked:
+  "The list callback url operation is blocked for triggers of type 'Request'."
+```
+
+**Button トリガー（`type: Request` / `kind: Button`）は callback URL の発行が禁止されている。**
+
+### 現時点の整理
+
+| 選択肢 | 起動 | 入力の受け渡し | 前提 |
+| --- | --- | --- | --- |
+| Button トリガー（現状）＋ `triggers/manual/run` | ⭕（ただし必須入力があると 400） | ❌ 不可 | 必須入力を外す必要あり |
+| `kind: Http`（HTTP 要求の受信時）へ変更 | ⭕ | ⭕ callback URL に POST | **プレミアム扱い。可否は未検証** |
+
+→ 次アクション: `kind: Button` → `kind: Http` に変更して import し、
+（a）ライセンス的に通るか（b）`listCallbackUrl` が解禁されるか を確認する。
+通らなければ Button トリガーの必須入力を外し、「入力なしで起動」に割り切ってループを完成させる。
+
+### 壁2の判定: `kind: Http` はライセンスで不可 — ❌ 案B 却下
+
+`src/Workflows/*.json` の `"kind": "Button"` → `"kind": "Http"` に変更して import。
+
+- **import 自体は成功**（`Solution Imported successfully.` / `Published All Customizations.`）。
+- しかし**フローは `state: Stopped`（下書き）に落ち、トリガーは `Disabled`** になった。
+- `listCallbackUrl` は依然 `ListCallbackUrlOperationBlocked`（この API 経路では Request 型トリガーの
+  URL 発行は種別に関係なく禁止されている）。
+- 有効化を試みると決定的なエラー:
+
+```text
+POST /flows/{id}/start
+→ 403 MissingAdequateQuotaPolicy:
+  "Flow could not be activated because you need a Power Automate Premium license
+   or other license that includes premium connectors to save this flow with connection: 'Http'"
+```
+
+**HTTP 要求トリガーは Power Automate Premium ライセンスが必要で、本アカウントでは利用不可**と確定。
+→ 案B は却下。Button トリガー＋`triggers/manual/run`（入力なし起動）で進める。
+
+なお、`kind` を `Button` に戻して再 import すると、フローのプロパティに
+**`flowTriggerUri`**（`https://japan-001.azure-apim.net/apim/logicflows/{internalWorkflowId}/triggers/manual/run`）
+が現れる。Button トリガーには APIM 経由の実行 URI が存在するが、`listCallbackUrl` 経由では取得できない。
+
+---
+
+## 2026-08-27 — P8: Draft フローの有効化 — ✅ 解決（第一段階の課題②）
+
+`kind` を `Button` に戻し、トリガーの必須指定（`required: ["text"]`）を外して再デプロイした直後は、
+まだ `MissingAdequateQuotaPolicy`（'Http' コネクション）が返った。**数十秒待って再試行すると成功**:
+
+```text
+POST /providers/Microsoft.ProcessSimple/environments/{env}/flows/{flowId}/start?api-version=2016-11-01
+→ 200
+state after start : Started
+trigger manual state=Enabled
+```
+
+**第一段階で「pac 2.11.2 には手段が見当たらない」としていたモダンフローの有効化が、Flow API の
+`POST /start` で可能**と判明。`--activate-plugins` に依存せず、Draft に落ちたフローも復帰できる。
+
+### 実装上の注意
+
+- **import 直後のライセンス評価にはラグがある**。直前の定義（プレミアム要素あり）で判定され
+  403 になることがあるため、`/start` は**リトライ前提**で実装する
+  （`repair-loop.ps1` の `Ensure-FlowStarted` は最大5回・10秒間隔でリトライ）。
+- 403 は「エンドポイントが無い」ではなく「ライセンス判定」。404 と区別して扱う。
+
+---
+
+## 2026-08-27 — P5: API からのフロー起動 — ✅ 成功
+
+必須入力を外した Button トリガーに対して:
+
+```text
+POST /flows/{flowId}/triggers/manual/run?api-version=2016-11-01
+→ HTTP 200
+```
+
+**CLI/API からのフロー起動が成立**（第一段階の成功条件5「フローを実行できる」を人手なしで達成）。
+
+### 制約: 入力は渡せない
+
+- `run` エンドポイントはリクエストボディをトリガーへ転送しない（ボディ7通りで検証済み）。
+- 応答に Logic Apps の run 名は含まれない（返るのは `japaneast:<guid>` 形式のリクエスト ID）。
+  → **run の特定は「起動時刻以降に開始された最新 run」を実行履歴から突き合わせる**方式にした。
+- したがって第一段階で追加した「スキル検索入力」は、**ポータルからの手動実行では使えるが、
+  API 起動では空扱い**になる（`coalesce` で null 安全化してあるため実行は成功し、
+  稼働可能な全員が返る）。入力を渡した自動実行が必要なら Premium（HTTP トリガー）が前提。
+
+---
+
+## 2026-08-27 — P6: 実行結果の即時取得とアクション詳細 — ✅ 成功
+
+### 即時性 — 25分遅延の解消
+
+| 経路 | 反映までの時間 |
+| --- | --- |
+| Dataverse `flowrun` テーブル（第一段階） | **約25分**（実測10〜79分） |
+| Flow API `GET /flows/{id}/runs`（第二段階） | **数秒** |
+
+実測: 09:18:27 起動 → 09:18:29 完了 → 09:19:02 時点で `status: Succeeded` を取得済み。
+**秒オーダーでの監視が可能**（成功条件4を満たす）。
+
+### アクションレベルの詳細 — 第一段階の制約の解消
+
+```text
+GET /flows/{flowId}/runs/{runId}/actions?api-version=2016-11-01
+→ 200
+    Compose                      status=Succeeded  code=OK
+    Filter_array                 status=Succeeded  code=NotSpecified
+    List_rows_present_in_a_table  status=Succeeded  code=OK
+```
+
+第一段階では FlowRun の `errormessage` が `{"code":"ActionFailed","message":"An action failed.
+No dependent actions succeeded."}` という汎用文だけで、**どのアクションが失敗したか分からなかった**。
+Flow API の `/actions` は**アクション単位の status / code / error** を返すため、この制約が解消される。
+
+- `/operations` は 404（存在しない）。正しいパスは `/actions`。
+- 失敗アクションの入出力は `inputsLink` / `outputsLink`（署名付き URL）で参照できるため、
+  `fetch-flow-runs.ps1` はこれを追跡して本文を `logs/latest-flow-run.json` に格納する。
+- run 詳細（`/runs/{id}`）の properties は `startTime, endTime, status, correlation, trigger, isAborted`。
+
+---
+
+## 2026-08-27 — P7: 1コマンド完全自動ループ — ✅ **第二段階 PoC 成功**
+
+### 実行内容
+
+エラー注入（第一段階と同じ Filter array の式破壊: `body/value` → `body/values`）を行い、
+**1コマンドだけ**実行した。
+
+```powershell
+.\scripts\repair-loop.ps1 -MaxIterations 2
+```
+
+### 実行結果（人間の介入ゼロ）
+
+```text
+==== preflight ====
+[loop] Flow API token: OK
+[loop] pac Dataverse connection: OK
+
+==== iteration 1 / 2 ====
+[deploy] pack -> import: Solution Imported successfully. / Published All Customizations.
+[loop] flow state: Started
+[trigger] POST triggers/manual/run -> HTTP 200
+[fetch] run 08584...CU61 detected (status=Running)
+[fetch] run 08584...CU61 status=Failed
+[fetch] FAILED action: Filter_array  code=BadRequest
+[loop] trigger -> verdict in 7s (exit 2)
+
+==== AI repair (iteration 1) ====   ← claude -p による非対話修正
+（AI の出力）
+ 1. 特定した失敗アクション名: Filter_array（BadRequest — 'from' が Null 型、配列である必要がある）
+ 2. 根本原因: from が body/values という存在しないキーを参照しており、Excel GetItems の
+    実際の出力キー body/value と不一致で Null に解決されていた
+ 3. 変更: Filter_array の from を ?['body/values'] -> ?['body/value'] に修正（1箇所のみ）。
+    接続参照・認証・table GUID・トリガーには一切触れていない
+
+==== iteration 2 / 2 ====
+[deploy] pack -> import: Solution Imported successfully.
+[loop] flow state: Started
+[trigger] POST triggers/manual/run -> HTTP 200
+[fetch] run 08584...CU39 status=Succeeded
+[loop] trigger -> verdict in 7s (exit 0)
+
+==== summary ====
+RESULT: Succeeded   (exit 0)
+```
+
+### AI に渡された入力（`logs/latest-flow-run.json`）
+
+第二段階の監視スクリプトが生成した JSON。**第一段階との差はここが決定的**。
+
+```json
+{
+  "flowName": "GetAvailableHumanResources",
+  "runId": "08584...CU61",
+  "status": "Failed",
+  "durationMs": 477,
+  "error": { "code": "ActionFailed", "message": "An action failed. No dependent actions succeeded." },
+  "actions": [
+    { "name": "Compose", "status": "Skipped", "code": "ActionSkipped" },
+    { "name": "Filter_array", "status": "Failed", "code": "BadRequest" },
+    { "name": "List_rows_present_in_a_table", "status": "Succeeded", "code": "OK" }
+  ],
+  "failedActions": [
+    {
+      "name": "Filter_array",
+      "status": "Failed",
+      "code": "BadRequest",
+      "error": {
+        "code": "BadRequest",
+        "message": "The 'from' property value in the 'query' action inputs is of type 'Null'. The value must be an array."
+      }
+    }
+  ],
+  "source": "PowerAutomateManagementApi"
+}
+```
+
+- `error`（フローレベル）は第一段階と同じ汎用文だが、**`failedActions[].error.message` に
+  原因そのものが入る**。AI はこれだけで正しく原因特定できた。
+- 失敗アクションの `inputsLink` / `outputsLink` は今回のケースでは提供されず `null` だったが、
+  `error.message` で十分だった（リンクがある場合はスクリプトが本文を追跡する実装済み）。
+
+### 検証: AI が禁止領域を触っていないこと
+
+ループ完了後の `git status` で **`src/` に差分なし**。
+つまり AI の修正後のソースは、エラー注入前のベースラインコミットと**バイト単位で一致**した。
+接続参照・テナント ID・SharePoint ID・table GUID・トリガー定義はいずれも無変更。
+
+### 所要時間
+
+| 区間 | 実測 |
+| --- | --- |
+| pack → import → publish | 約60〜90秒 |
+| 起動 → 実行結果の判定 | **7秒** |
+| AI 修正（`claude -p`） | 約60〜90秒 |
+| 1周（デプロイ〜判定） | 約2分 |
+
+---
+
+## 第二段階の成功条件（計画 §7）の判定
+
+| # | 条件 | 判定 | 備考 |
+| --- | --- | --- | --- |
+| 1 | アプリ登録なしで Flow API トークンを取得できる | ✅ | Azure CLI パブリッククライアント＋デバイスコード。管理者同意も不要 |
+| 2 | 2回目以降はリフレッシュトークンで無人実行できる | ✅ | DPAPI 暗号化して `.secrets/` に保存。ループ実行時は無人 |
+| 3 | CLI からフローを起動できる | ✅ | `POST /triggers/manual/run` → 200 |
+| 4 | 実行結果を秒オーダーで取得できる | ✅ | **7秒**（第一段階は約25分） |
+| 5 | 失敗したアクション名とエラー内容を取得できる | ✅ | `/runs/{id}/actions` でアクション単位に取得 |
+| 6 | `claude -p` による非対話 AI 修正が成立する | ✅ | `--permission-mode acceptEdits --allowedTools Read Edit Write Grep Glob` |
+| 7 | 1コマンドで全周が回る | ✅ | `.\scripts\repair-loop.ps1` |
+| 8 | 反復上限・タイムアウトで無限ループしない | ✅ | `-MaxIterations` / `-RunTimeoutSec` / `/start` リトライ上限 |
+| 9 | AI が禁止領域を触らない | ✅ | `git status` で src 差分ゼロを確認 |
+| 10 | Draft に落ちたフローを CLI/API で有効化できる | ✅ | `POST /start` → 200（第一段階の課題②を解決） |
+
+**10項目すべて成立 — 第二段階 PoC 成功。**
+
+---
+
+## 第二段階で判明した制約（実案件適用時の判断材料）
+
+| # | 制約 | 影響 | 回避策 |
+| --- | --- | --- | --- |
+| 1 | **pac CLI だけでは実行系に到達できない** | `pac auth token` の audience が固定。Flow API / Dataverse とも 401 | 別トークン（デバイスコード or サービスプリンシパル）が必須 |
+| 2 | **API 起動では入力を渡せない** | Button トリガーの `run` はボディを転送しない。`listCallbackUrl` はブロック | 入力が必要なら Premium（HTTP 要求トリガー）が前提。または入力を Excel/Dataverse 側の値で持つ設計にする |
+| 3 | **HTTP 要求トリガーは Premium 必須** | `MissingAdequateQuotaPolicy`（本アカウントでは不可） | ライセンス調達、または制約2の設計変更 |
+| 4 | **接続参照を `embedded` にする必要がある** | 実行主体が対話ユーザーからサービスへ変わる。既存フローに手を入れることになる | フロー設計時点で自動化前提にしておく |
+| 5 | **非公式 API 依存** | `api.flow.microsoft.com` の ProcessSimple プロバイダは未ドキュメント。仕様変更で壊れ得る | 実案件では Power Automate Management コネクタ等への置き換えを検討 |
+| 6 | **リフレッシュトークンが非アクティブ12時間で失効**（テナントポリシー） | 完全無人の常時運用には日次サインインが必要 | Entra ID アプリ登録＋サービスプリンシパル（要管理者権限） |
+| 7 | **import 直後はライセンス評価にラグ** | `/start` が一時的に 403 を返す | リトライ実装（本ループは最大5回・10秒間隔） |
+| 8 | **Windows PowerShell 5.1 は BOM なし UTF-8 の .ps1 を ANSI 解釈** | 日本語リテラルが壊れて構文エラー | スクリプトは ASCII のみ。パスもリテラル指定せず相対パス／`$PSScriptRoot` を使う |
+
+## 第三段階への申し送り
+
+- 制約2（入力を渡せない）は、フローを複雑化するうえで最も効く。
+  ユーザー入力起点の検証を続けるなら **Premium ライセンスの有無を先に確定**させるべき。
+- 複数コネクタ（SharePoint / Dataverse / Teams / Planner）への拡張時は、
+  制約4（`embedded` 化）を全接続参照に適用する必要がある。
+- 失敗アクションの `inputsLink` / `outputsLink` を実際に使うケース（大きな入出力を伴う失敗）は
+  未検証。実装は済んでいるので、複雑なフローで確認するとよい。
+

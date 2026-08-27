@@ -2,7 +2,7 @@
   "properties": {
     "connectionReferences": {
       "shared_excelonlinebusiness": {
-        "runtimeSource": "invoker",
+        "runtimeSource": "embedded",
         "connection": {
           "connectionReferenceLogicalName": "yourpublisher_YourSolution.shared_excelonlinebusiness.shared-excelonlinebu-YOUR-CONNECTION-ID"
         },
@@ -39,13 +39,10 @@
                   "title": "スキル",
                   "type": "string",
                   "x-ms-dynamically-added": true,
-                  "description": "検索したいスキル（部分一致）",
+                  "description": "検索したいスキル（部分一致・空欄可）",
                   "x-ms-content-hint": "TEXT"
                 }
-              },
-              "required": [
-                "text"
-              ]
+              }
             }
           }
         }

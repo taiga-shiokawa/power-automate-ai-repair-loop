@@ -1,15 +1,31 @@
-{
-  "flowName": "GetAvailableHumanResources",
-  "workflowId": "f57394bc-e3a1-f111-b8de-70a8a5876024",
-  "flowRunId": "7b823dea-fd59-294a-3790-e9d2dc058ab2",
-  "runName": "08584137914979981716553562308CU63",
-  "status": "Failed",
-  "errorCode": "ActionFailed",
-  "errorMessage": "An action failed. No dependent actions succeeded.",
-  "triggerType": "Instant",
-  "startTime": "2026-08-27T07:23:00Z",
-  "endTime": "2026-08-27T07:23:00Z",
-  "durationMs": 2590,
-  "recordCreatedOn": "2026-08-27T07:48:00Z",
-  "note": "createdon は starttime の約25分後 = FlowRun 書き込み遅延の実測値。errormessage はフローレベルの汎用メッセージのみで、失敗アクション名や式エラーの詳細は含まれない。"
+﻿{
+    "flowName":  "GetAvailableHumanResources",
+    "runId":  "08584137842381440838493802382CU39",
+    "status":  "Succeeded",
+    "startTime":  "2026-08-27T09:24:07.3344545Z",
+    "endTime":  "2026-08-27T09:24:08.7083778Z",
+    "durationMs":  1374,
+    "error":  null,
+    "actions":  [
+                    {
+                        "name":  "Compose",
+                        "status":  "Succeeded",
+                        "code":  "OK"
+                    },
+                    {
+                        "name":  "Filter_array",
+                        "status":  "Succeeded",
+                        "code":  "NotSpecified"
+                    },
+                    {
+                        "name":  "List_rows_present_in_a_table",
+                        "status":  "Succeeded",
+                        "code":  "OK"
+                    }
+                ],
+    "failedActions":  [
+
+                      ],
+    "source":  "PowerAutomateManagementApi",
+    "fetchedAtUtc":  "2026-08-27T09:24:13.7045468Z"
 }

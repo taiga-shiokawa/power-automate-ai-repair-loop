@@ -1,3 +1,10 @@
 # pac solution export / pack の生成物（zip は再生成可能なため管理しない）
 AIFlowDevelopment.zip
 dist/
+
+# 第二段階: 環境固有 ID とトークン（絶対にコミットしない）
+.secrets/
+local.config.json
+
+# 実行ログの履歴（都度生成物）
+logs/history/

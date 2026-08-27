@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy to local.config.json and fill in your own environment values. local.config.json is gitignored.",
+  "_howToFind": {
+    "tenantId / environmentId / orgUrl": "pac env who",
+    "workflowId / workflowIdUnique": "pac env fetch --xml \"<fetch><entity name='workflow'><attribute name='workflowid'/><attribute name='workflowidunique'/><attribute name='name'/><attribute name='statecode'/><filter><condition attribute='name' operator='eq' value='YOUR-FLOW-NAME'/></filter></entity></fetch>\"",
+    "publicClientId": "Azure CLI's well-known public client id. Used for the device code flow so that no app registration is required."
+  },
+
+  "tenantId": "YOUR-TENANT-ID",
+  "environmentId": "Default-YOUR-TENANT-ID",
+  "orgUrl": "https://YOURORG.crm7.dynamics.com/",
+  "solutionName": "AIFlowDevelopment",
+  "flowName": "GetAvailableHumanResources",
+  "workflowId": "YOUR-WORKFLOW-ID",
+  "workflowIdUnique": "YOUR-WORKFLOW-UNIQUE-ID",
+  "publicClientId": "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+  "flowApiResource": "https://service.flow.microsoft.com/",
+  "flowApiBase": "https://api.flow.microsoft.com"
+}
