@@ -1,0 +1,111 @@
+{
+  "properties": {
+    "connectionReferences": {
+      "shared_excelonlinebusiness": {
+        "runtimeSource": "invoker",
+        "connection": {
+          "connectionReferenceLogicalName": "yourpublisher_YourSolution.shared_excelonlinebusiness.shared-excelonlinebu-YOUR-CONNECTION-ID"
+        },
+        "api": {
+          "name": "shared_excelonlinebusiness"
+        }
+      }
+    },
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": {
+          "defaultValue": {},
+          "type": "Object"
+        },
+        "$authentication": {
+          "defaultValue": {},
+          "type": "SecureObject"
+        }
+      },
+      "triggers": {
+        "manual": {
+          "metadata": {
+            "operationMetadataId": "f3885daf-839a-449b-a820-9a4875e66c16"
+          },
+          "type": "Request",
+          "kind": "Button",
+          "inputs": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "title": "スキル",
+                  "type": "string",
+                  "x-ms-dynamically-added": true,
+                  "description": "検索したいスキル（部分一致）",
+                  "x-ms-content-hint": "TEXT"
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          }
+        }
+      },
+      "actions": {
+        "List_rows_present_in_a_table": {
+          "runAfter": {},
+          "metadata": {
+            "YOUR-FILE-ID": "/HumanResources.xlsx",
+            "operationMetadataId": "82794984-bfeb-41e2-be04-34334e399512"
+          },
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "connectionName": "shared_excelonlinebusiness",
+              "operationId": "GetItems",
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_excelonlinebusiness"
+            },
+            "parameters": {
+              "source": "groups/YOUR-SHAREPOINT-GROUP-ID",
+              "drive": "YOUR-DRIVE-ID",
+              "file": "YOUR-FILE-ID",
+              "table": "{YOUR-TABLE-ID}"
+            },
+            "authentication": {
+              "type": "Raw",
+              "value": "@json(decodeBase64(triggerOutputs().headers['X-MS-APIM-Tokens']))['$ConnectionKey']"
+            }
+          }
+        },
+        "Filter_array": {
+          "runAfter": {
+            "List_rows_present_in_a_table": [
+              "Succeeded"
+            ]
+          },
+          "metadata": {
+            "operationMetadataId": "a12c9ebb-5922-48b1-b762-8b354128af08"
+          },
+          "type": "Query",
+          "inputs": {
+            "from": "@outputs('List_rows_present_in_a_table')?['body/value']",
+            "where": "@and(equals(item()?['稼働状況'], '稼働可能'), contains(toLower(coalesce(item()?['スキル'], '')), toLower(coalesce(triggerBody()?['text'], ''))))"
+          }
+        },
+        "Compose": {
+          "runAfter": {
+            "Filter_array": [
+              "Succeeded"
+            ]
+          },
+          "metadata": {
+            "operationMetadataId": "3e1c9f9a-0bc6-439d-ac98-913903f9afdb"
+          },
+          "type": "Compose",
+          "inputs": "@body('Filter_array')"
+        }
+      }
+    },
+    "templateName": null
+  },
+  "schemaVersion": "1.0.0.0"
+}
